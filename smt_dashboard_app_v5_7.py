@@ -13,9 +13,9 @@ PRICE_STORE = "price_store.parquet"
 CPK_COMPONENTS = {"CP1", "CC02-05_CPP", "CC02-05"}
 
 st.title("📊 Oradea SMT — Multi-Day Line Reject Dashboard (v5.3)")
-st.caption(\"\"\"
+st.caption("""
 New in v5.3: **2‑decimal waste% labels above Totals‑by‑Line bars** and **copyable lists of component names** (top by reject%, placed, and waste cost). Keeps the 'Label' exclusion and store restore.
-\"\"\")
+""")
 
 # ---------------------- Utils ----------------------
 def infer_date_from_filename(name: str):
