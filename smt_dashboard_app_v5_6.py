@@ -1,4 +1,3 @@
-
 import io, os, re, json
 import pandas as pd
 import numpy as np
@@ -23,7 +22,7 @@ def infer_date_from_filename(name: str):
     if not name:
         return None
     s = name
-    m = re.search(r"(\\d{1,2})\\s*([A-Za-z]{3})[A-Za-z]*\\s*(\\d{4})", s)
+    m = re.search(r"(\d{1,2})\s*([A-Za-z]{3})[A-Za-z]*\s*(\d{4})", s)
     if m:
         d, mon, y = m.group(1), m.group(2), m.group(3)
         try:
@@ -31,14 +30,14 @@ def infer_date_from_filename(name: str):
             return dt
         except: 
             pass
-    m = re.search(r"(\\d{4})[-_](\\d{1,2})[-_](\\d{1,2})", s)
+    m = re.search(r"(\d{4})[-_](\d{1,2})[-_](\d{1,2})", s)
     if m:
         y, mo, d = map(int, m.groups())
         try:
             return datetime(y, mo, d).date()
         except: 
             pass
-    m = re.search(r"(\\d{1,2})[.\\-](\\d{1,2})[.\\-](\\d{4})", s)
+    m = re.search(r"(\d{1,2})[.\-](\d{1,2})[.\-](\d{4})", s)
     if m:
         d, mo, y = map(int, m.groups())
         try:
@@ -49,7 +48,7 @@ def infer_date_from_filename(name: str):
 
 def clean_columns(cols: pd.Index) -> list:
     import re
-    return [re.sub(r"\\s+", " ", str(c)).strip() for c in cols]
+    return [re.sub(r"\s+", " ", str(c)).strip() for c in cols]
 
 def contextual_rename(df: pd.DataFrame) -> pd.DataFrame:
     import re
@@ -58,7 +57,7 @@ def contextual_rename(df: pd.DataFrame) -> pd.DataFrame:
     prev = None
     graph_count = 0
     for c in cols:
-        cn = re.sub(r"\\s+", " ", str(c)).strip()
+        cn = re.sub(r"\s+", " ", str(c)).strip()
         if cn in {"%", "% ", "%"}:
             cn = f"{prev} %" if prev else "Percent"
         if cn.lower() == "graph":
@@ -161,7 +160,7 @@ with st.sidebar:
     st.header("➕ Ingest data")
     daily_files = st.file_uploader("Upload daily Excel report(s)", type=["xlsx"], accept_multiple_files=True)
 
-    st.write("Optional: Upload **Price.xlsx** (columns: `Component`, `Price (USD)`")
+    st.write("Optional: Upload **Price.xlsx** (columns: `Component`, `Price (USD)`)")
     price_file = st.file_uploader("Upload price list", type=["xlsx"], accept_multiple_files=False, key="price")
 
     colA, colB = st.columns(2)
@@ -232,9 +231,16 @@ if not data.empty and not price_store.empty:
     data["Component"] = data["Component"].astype(str).str.strip()
     price_store["Component"] = price_store["Component"].astype(str).str.strip()
     data = data.merge(price_store[["Component","Price (USD)"]], on="Component", how="left")
-    if "Sum" in data.columns and "Wasted" in data.columns:
+    # Ensure Tower numeric for tray filter
+    if "Tower" in data.columns:
+        data["Tower"] = pd.to_numeric(data["Tower"], errors="coerce")
+    # Cost Consumed includes tray
+    if "Sum" in data.columns and "Price (USD)" in data.columns:
         data["Cost Consumed (USD)"] = data["Sum"].astype(float) * data["Price (USD)"].astype(float)
-        data["Cost Wasted (USD)"]  = data["Wasted"].astype(float) * data["Price (USD)"].astype(float)
+    # Cost Wasted excludes tray components (Tower==1)
+    if "Wasted" in data.columns and "Price (USD)" in data.columns:
+        not_tray = (data["Tower"] != 1) | (data["Tower"].isna()) if "Tower" in data.columns else True
+        data["Cost Wasted (USD)"]  = np.where(not_tray, data["Wasted"].astype(float) * data["Price (USD)"].astype(float), 0.0)
 
 # ---------------------- Filters ----------------------
 if data.empty:
@@ -268,11 +274,9 @@ if "Tower" in subset.columns:
 # Exclude CPK components and 'Label'
 subset["Component"] = subset["Component"].astype(str)
 if exclude_cpk:
-    subset = subset[~subset["Component"].str.strip().str.upper().isin({"CP1","CC02-05_CPP","CC02-05"})]
+    subset = subset[~subset["Component"].str.strip().str.upper().isin({"CP1","CC02-05_CPP","CC02-05","CERAMPAD1"})]
 if exclude_label:
     subset = subset[~subset["Component"].str.contains("label", case=False, na=False)]
-# Always exclude Cerampad1
-subset = subset[~subset["Component"].str.strip().str.upper().eq("CERAMPAD1")]
 
 if subset.empty:
     st.warning("No data in the selected range/lines (after filters).")
@@ -287,30 +291,25 @@ elif granularity == "Week":
 else:
     subset["Period"] = subset["Report Date"].dt.to_period("M").astype(str)
 
-
-
 # ---------------------- KPIs ----------------------
 k1, k2, k3, k4, k5, k6 = st.columns(6)
 total_placed = pd.to_numeric(subset.get("Sum"), errors="coerce").sum()
 total_waste  = pd.to_numeric(subset.get("Wasted"), errors="coerce").sum()
-overall_reject = (total_waste / total_placed * 100) if total_placed and not pd.isna(total_placed) and total_placed != 0 else np.nan
+overall_reject = (total_waste / total_placed * 100) if total_placed else np.nan
 
-# Costs (if price list provided)
-consumed_cost = pd.to_numeric(subset.get("Cost Consumed (USD)"), errors="coerce").sum() if "Cost Consumed (USD)" in subset.columns else np.nan
-wasted_cost   = pd.to_numeric(subset.get("Cost Wasted (USD)"), errors="coerce").sum() if "Cost Wasted (USD)" in subset.columns else np.nan
-waste_cost_pct = (wasted_cost / consumed_cost * 100) if (pd.notna(consumed_cost) and consumed_cost not in (0, np.nan)) else np.nan
-target_pct = 14.0
-delta_to_target = (waste_cost_pct - target_pct) if pd.notna(waste_cost_pct) else np.nan
+cost_consumed = pd.to_numeric(subset.get("Cost Consumed (USD)"), errors="coerce").sum() if "Cost Consumed (USD)" in subset.columns else np.nan
+cost_wasted   = pd.to_numeric(subset.get("Cost Wasted (USD)"), errors="coerce").sum() if "Cost Wasted (USD)" in subset.columns else np.nan
+waste_cost_pct = (cost_wasted / cost_consumed * 100) if (pd.notna(cost_consumed) and cost_consumed) else np.nan
+target = 14.0
+delta_pp = (waste_cost_pct - target) if pd.notna(waste_cost_pct) else np.nan
 
 k1.metric("Total Components Placed", f"{int(total_placed):,}" if pd.notna(total_placed) else "—")
 k2.metric("Total Waste (pcs)", f"{int(total_waste):,}" if pd.notna(total_waste) else "—")
 k3.metric("Overall Reject % (Waste/Sum)", f"{overall_reject:.2f}%" if pd.notna(overall_reject) else "—")
-k4.metric("Cost Consumed (USD)", f"${consumed_cost:,.2f}" if pd.notna(consumed_cost) else "—")
-k5.metric("Cost of Waste (USD)", f"${wasted_cost:,.2f}" if pd.notna(wasted_cost) else "—")
-if pd.notna(waste_cost_pct):
-    k6.metric("Waste Cost % (vs 14% target)", f"{waste_cost_pct:.2f}%", f"{delta_to_target:+.2f} pp")
-else:
-    k6.metric("Waste Cost % (vs 14% target)", "—")
+k4.metric("Cost Consumed (USD)", f"${cost_consumed:,.2f}" if pd.notna(cost_consumed) else "—")
+k5.metric("Cost of Waste (USD)", f"${cost_wasted:,.2f}" if pd.notna(cost_wasted) else "—")
+k6.metric("Waste Cost % (vs 14% target)", f"{waste_cost_pct:.2f}%" if pd.notna(waste_cost_pct) else "—", delta=f"{(delta_pp):+.2f} pp" if pd.notna(delta_pp) else None)
+
 st.divider()
 
 
@@ -394,13 +393,6 @@ with right:
     fig2.update_layout(xaxis_title=group_by, yaxis_title="Total Placed (Sum)")
     st.plotly_chart(fig2, use_container_width=True)
 
-# New chart: Top by Wasted (pcs) — always by Component
-st.subheader(f"Top {top_n} by Total Wasted (pcs) — Component")
-top_wasted_components = subset.groupby("Component", dropna=False)["Wasted"].sum().reset_index().sort_values("Wasted", ascending=False).head(top_n)
-fig_wasted_components = px.bar(top_wasted_components, x="Component", y="Wasted")
-fig_wasted_components.update_layout(xaxis_title="Component", yaxis_title="Wasted (pcs)")
-st.plotly_chart(fig_wasted_components, use_container_width=True)
-
 if top_cost is not None:
     st.subheader(f"Top {top_n} by **Cost of Waste (USD)** — {group_by}")
     fig3 = px.bar(top_cost, x=group_by, y="Cost Wasted (USD)")
@@ -416,15 +408,15 @@ if group_by == "Component":
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.text_area("Top by Overall Reject % (names)", value="\\n".join(names_reject), height=220)
-        st.download_button("Download list (reject%).txt", data="\\n".join(names_reject), file_name="top_reject_components.txt")
+        st.text_area("Top by Overall Reject % (names)", value="\n".join(names_reject), height=220)
+        st.download_button("Download list (reject%).txt", data="\n".join(names_reject), file_name="top_reject_components.txt")
     with c2:
-        st.text_area("Top by Placed (names)", value="\\n".join(names_placed), height=220)
-        st.download_button("Download list (placed).txt", data="\\n".join(names_placed), file_name="top_placed_components.txt")
+        st.text_area("Top by Placed (names)", value="\n".join(names_placed), height=220)
+        st.download_button("Download list (placed).txt", data="\n".join(names_placed), file_name="top_placed_components.txt")
     with c3:
         if names_cost:
-            st.text_area("Top by Waste Cost (names)", value="\\n".join(names_cost), height=220)
-            st.download_button("Download list (waste_cost).txt", data="\\n".join(names_cost), file_name="top_waste_cost_components.txt")
+            st.text_area("Top by Waste Cost (names)", value="\n".join(names_cost), height=220)
+            st.download_button("Download list (waste_cost).txt", data="\n".join(names_cost), file_name="top_waste_cost_components.txt")
         else:
             st.info("Upload a price list to enable waste cost rankings.")
 
